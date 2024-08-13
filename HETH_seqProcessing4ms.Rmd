@@ -1,0 +1,739 @@
+---
+title: "HETH_processing_6-5-2021"
+author: "Nicole Adams"
+date: "6/5/2021"
+output: 
+  html_document:
+    toc: true
+    code_folding: show
+---
+
+# Sequence processesing for HETH samples
+We split all samples 236 into two libraries and sequenced each library on a separate lane of NovaSeq. Library HETH_005 had 118 samples and library HETH_006 had 118 samples. The sequencing resulted in 476 files, which included forward and reverse files for each sample plus forward and reverse files for reads that could not be demultiplexed and were labeled "Undetermined".
+
+&nbsp;
+
+Load in libraries
+```{r, warning=FALSE, message=FALSE}
+library(readxl)
+library(data.table)
+library(tidyverse)
+library(viridis)
+library(cowplot)
+library(ggpubr) 
+library(knitr)
+library(kableExtra)
+```
+
+&nbsp;
+
+# Load in metadata and tidy
+```{r, warning=FALSE, message=FALSE}
+# sample metadata
+meta1a <- read_excel("~/Documents/clim_morph_HETH/HETH_WGLC_005&006_libprep.xlsx", sheet = "Lib Prep")
+meta1a$Sample_og <- meta1a$Sample
+meta1a$Sample1 <- "Z"
+meta1 <- meta1a %>% unite("Sample", Sample1:Sample_og, sep = "")
+
+# sample seq data for Novogene
+meta2 <- read_excel("~/Documents/clim_morph_HETH/HETH_SIFLIB.xlsx")
+colnames(meta2) <- c("LibraryType", "Library", "Sample", "DataDelivery", "index_i7", "index_i5", "insertSz", "Status", "totalData", "dataUnit", "conc", "volume")
+meta2 <- meta2 %>% select(Sample, Library, index_i7, index_i5, insertSz, conc, volume)
+meta12 <- full_join(meta1, meta2)
+
+# raw seq results from Novogene
+meta3 <- read_tsv("~/Documents/clim_morph_HETH/HETH_qc.summary_final.txt")
+meta3 <- meta3 %>% filter(!Sample =="Undetermined")
+
+# combine Novogene data
+heth.meta1 <- full_join(meta12, meta3) # by=c("Sample")
+
+```
+
+&nbsp;
+
+summary statistics on raw reads
+```{r}
+# Number of raw reads across all samples (in billions)
+sum(meta3$`Raw reads`)/1000000000  #12.4
+
+# % of samples having 89% or more of reads with a quality score of Q>30
+(dim(meta3 %>% filter(`Q30(%)` > 89))[1]/dim(meta3)[1])*100  #91%
+
+```
+
+&nbsp;
+
+# Download raw sequence data from Novogene
+Bash commands for getting raw data from Novogene to Xsede etc.
+```{bash, eval=FALSE, message=FALSE}
+# For HETH Novogene -> Xsede
+mkdir /ocean/projects/deb200006p/adamsne2/HETH/raw_data
+
+# Run novogene2xsede.sbatch
+cd /ocean/projects/deb200006p/adamsne2/HETH/raw_data/
+wget -r -c ftp://X202SC21043579-Z01-F001:8e7g46xe@usftp21.novogene.com:21/
+
+# For HETH Novogene -> BAY_BIRDS external HD, via my mac
+mkdir /Volumes/BAY_BIRDS/HETH/raw_data
+cd raw_data
+/usr/local/opt/wget/bin/wget -r -c ftp://X202SC21043579-Z01-F001:8e7g46xe@usftp21.novogene.com:21/ 
+
+
+# Organize files
+# HETH: Copy fastq files from individual folders up a lvl to raw_data directory for easy access (~/scripts/mvUpRawFastq.sbatch)
+cp /ocean/projects/deb200006p/adamsne2/HETH/raw_data/usftp21.novogene.com/raw_data/*/*.gz /ocean/projects/deb200006p/adamsne2/HETH/raw_data/usftp21.novogene.com/raw_data
+
+# rm fq files in indiv folders but kept the MD5.txt files 
+rm */*.fq.gz
+
+```
+
+&nbsp;
+
+## Trimming
+Remove any adapters and trim raw reads based on read length and quality using Trim Galore!
+
+&nbsp;
+
+Trimming sbatch file (~/scripts/trimgalore_HETH.sbatch)
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash
+#SBATCH --job-name=TRIM
+#SBATCH --output=TRIM.%j.out
+#SBATCH --error=TRIM.%j.err
+#SBATCH -t 48:00:00
+#SBATCH -p RM-shared
+##SBATCH -N 1
+##SBATCH --mem=128G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH --mail-user=
+
+set -x
+
+module load FastQC/0.11.9
+module load cutadapt/2.10
+module load python/3.8.6
+
+###Identify directories
+fastq="/ocean/projects/deb200006p/adamsne2/HETH/raw_data/usftp21.novogene.com/raw_data"
+num=$2
+sample=$1
+
+#Note: Take a look at the names of the sample files and adjust this loop accordingly
+#For example, mine all had "CKDL190142674-1a-AK12626-AK16295_H3VF5CCX2_L8_2.fq.gz" or "USPD16094205-N707-AK392_HY5K5CCXY_L7_2.fq.gz" tacked on.
+
+### Trim low quality fragments and Illumina TruSeq adapters (-q = quality, --cores 1-4 python3 uses 2)
+mkdir ../trimd
+cd ../trimd
+
+# leave adapters blank so uses the auto-detect
+/jet/home/adamsne2/programs/TrimGalore-0.6.5/trim_galore -q 15 --paired --fastqc \
+$fastq/$sample\_L3_1.fq.gz $fastq/$sample\_L3_2.fq.gz
+
+```
+
+&nbsp;
+
+Test one sample
+```{bash, eval=FALSE, message=FALSE}
+for sample in `ls Z341567_CKDL210010184-1a-AK1858-N505_HC2JNDSX2_L3_1.fq.gz | cut -f1,2,3 -d '_'`; do echo $sample; sbatch ~/scripts/trimgalore_HETH.sbatch $sample; done
+
+```
+
+&nbsp;
+
+Pull down the new fastqc html file made after trimming to look at
+```{bash, eval=FALSE, message=FALSE}
+scp adamsne2@bridges2.psc.xsede.org:"/ocean/projects/deb200006p/adamsne2/HETH/raw_data/usftp21.novogene.com/trimd/*.html" .
+```
+
+&nbsp;
+
+Trim all samples by lane (L3=HETH_005, L4=HETH_006)
+```{bash, eval=FALSE, message=FALSE}
+for sample in `ls *_L3_1.fq.gz | cut -f1,2,3 -d '_'`; do echo $sample; sbatch ~/scripts/trimgalore_HETH.sbatch $sample; done
+
+for sample in `ls *_L4_1.fq.gz | cut -f1,2,3 -d '_'`; do echo $sample; sbatch ~/scripts/trimgalore_HETH2.sbatch $sample; done
+
+```
+
+&nbsp;
+&nbsp;
+
+## Mapping
+Download the Swainson's Thrush (Catharus ustulatus, SWTH) genome to Bridges2
+[SWTH genome](https://www.ncbi.nlm.nih.gov/genome/?term=Swainson%27s+Thrush) 
+
+```{bash, eval=FALSE}
+cd /ocean/projects/deb200006p/adamsne2/HETH/reference
+
+wget https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/009/819/885/GCF_009819885.2_bCatUst1.pri.v2/GCF_009819885.2_bCatUst1.pri.v2_genomic.fna.gz
+ 
+```
+
+&nbsp;
+
+### Index the reference genome and make a directory
+(~/scripts/indexReference_SWTH.sbatch)
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=REF.INDEX
+#SBATCH --output=REF.INDEX_%j_out
+#SBATCH --error=REF.INDEX_%j_err
+#SBATCH -t 12:00:00
+#SBATCH -p RM
+##SBATCH -N 1
+##SBATCH --ntasks-per-node 4
+##SBATCH --mem=16G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH --mail-user=
+
+set -x
+
+module load BWA/0.7.3a
+module load samtools/1.11.0
+module load picard/2.23.2
+
+cd /ocean/projects/deb200006p/adamsne2/HETH/reference/
+
+gunzip GCF_009819885.2_bCatUst1.pri.v2_genomic.fna.gz
+
+bwa index -a bwtsw GCF_009819885.2_bCatUst1.pri.v2_genomic.fna
+
+samtools faidx GCF_009819885.2_bCatUst1.pri.v2_genomic.fna
+
+java -jar /jet/home/adamsne2/programs/picard.jar CreateSequenceDictionary R=GCF_009819885.2_bCatUst1.pri.v2_genomic.fna O=GCF_009819885.2_bCatUst1.pri.v2_genomic.fna.dict
+
+gzip GCF_009819885.2_bCatUst1.pri.v2_genomic.fna
+```
+
+&nbsp;
+
+Mapping sbatch file (~/scripts/map.bwa_HETH_SWTH.sbatch)
+I had to include the bwa -M parameter to flag shorter split hits as secondary to make the resulting bam files compatible with PicardTools, which I use for markDuplicates and coverage estimates.
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=map_bwa
+#SBATCH --output=map-bwa.%j.out
+#SBATCH --error=map-bwa.%j.err
+#SBATCH -t 12:00:00
+#SBATCH -p RM
+##SBATCH -N 1
+##SBATCH --ntasks-per-node 24
+##SBATCH --mem=128G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH --mail-user=
+
+set -x
+
+
+module load BWA/0.7.3a
+module load samtools/1.11.0
+module load picard/2.23.2
+
+##Variables: Plate number and directory for bamUtil
+PLATE="HETH_005"
+BAMUTIL="/jet/home/adamsne2/programs/bamUtil/bin"
+#REFERENCE="/ocean/projects/deb200006p/adamsne2/HETH/reference/HETH.rmcont.assembly.fasta"
+REFERENCE="/ocean/projects/deb200006p/adamsne2/HETH/reference/GCF_009819885.2_bCatUst1.pri.v2_genomic.fna"
+
+lane=$2
+sample=$1
+sample2=$3
+
+
+cd /ocean/projects/deb200006p/adamsne2/HETH/raw_data/usftp21.novogene.com/trimd/
+
+##Align each sample to genome. Note that genome reference must already be built through bwa
+#mkdir ../../../bwa_map
+
+ID="$PLATE.$sample2.$lane"
+
+##map trimmed reads BY lane
+bwa mem -t 20 -M $REFERENCE "$sample"_1_val_1.fq.gz "$sample"_2_val_2.fq.gz > /ocean/projects/deb200006p/adamsne2/HETH/bwa_map/toSWTH/"$sample2".sw.sam
+
+cd /ocean/projects/deb200006p/adamsne2/HETH/bwa_map/toSWTH
+
+#########sort, add read group information and index it#########
+samtools sort -o "$sample2".sw.bam "$sample2".sw.sam -@ 10
+samtools index "$sample2".sw.bam -@10
+
+##Add read groups (dont do this for HETH)
+#java -jar /jet/home/adamsne2/programs/picard.jar AddOrReplaceReadGroups INPUT=aln_"$sample2".bam RGID="$ID" RGLB="$PLATE" RGPL=illumina RGPU="$PLATE"."$sample2"."lane" RGSM="$sample2" OUTPUT="$sample2"_RG.bam VALIDATION_STRINGENCY=SILENT 
+
+#samtools index "$sample2"_RG.bam -@10
+
+
+rm "$sample2".sw.sam
+
+```
+
+&nbsp;
+
+Map loop for a small set of samples to see how well they do
+```{bash, eval=FALSE}
+#/ocean/projects/deb200006p/adamsne2/HETH/raw_data/usftp21.novogene.com/trimd
+
+# test a small set of samples to see how well they do n=24
+for sample in `ls Z43*L3_1_val_1.fq.gz | cut -f1,2,3,4 -d'_'`; do lane=`ls $sample\_1_val_1.fq.gz | cut -f4 -d"_"`; sample2=`ls $sample\_1_val_1.fq.gz | cut -f1 -d'_'`; echo $sample; echo $lane;echo $sample2; sbatch ~/scripts/map.bwa_HETH_SWTH.sbatch $sample $lane $sample2; done 
+
+# Map the remaining samples in L3
+for sample in `ls *L3_1_val_1.fq.gz | grep -v "Z43" | cut -f1,2,3,4 -d'_'`; do lane=`ls $sample\_1_val_1.fq.gz | cut -f4 -d"_"`; sample2=`ls $sample\_1_val_1.fq.gz | cut -f1 -d'_'`; echo $sample; echo $lane;echo $sample2; sbatch ~/scripts/map.bwa_HETH_SWTH.sbatch $sample $lane $sample2; done 
+
+# Map L4 *Change the PLATE to HETH_006
+for sample in `ls *L4_1_val_1.fq.gz | cut -f1,2,3,4 -d'_'`; do lane=`ls $sample\_1_val_1.fq.gz | cut -f4 -d"_"`; sample2=`ls $sample\_1_val_1.fq.gz | cut -f1 -d'_'`; echo $sample; echo $lane;echo $sample2; sbatch ~/scripts/map.bwa_HETH_SWTH.sbatch $sample $lane $sample2; done
+```
+
+&nbsp;
+
+Mapping summaries
+Bash commands for samtools flagstat to get mapping summaries. Then take the results and make a table and put in one file to be put into Rstudio.
+batch file (~/scripts/sam.flagstat_HETH_SWTH.sbatch)
+
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash
+#SBATCH --job-name=map_sum
+#SBATCH --output=map-sum.%j.out
+#SBATCH --error=map-sum.%j.err
+#SBATCH -t 10:00:00
+#SBATCH -p RM
+##SBATCH -N 1
+##SBATCH --ntasks-per-node 24
+##SBATCH --mem=128G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH --mail-user=
+
+set -x
+
+
+module load samtools/1.11.0
+
+#cd /ocean/projects/deb200006p/adamsne2/HETH/bwa_map/toSWTH
+
+touch mapSummary_HETH_SWTH.txt
+
+for sample in `ls *.bam | cut -f1 -d'.'`
+do
+  samtools flagstat "$sample".sw.bam -@ 10  > "$sample"_sw.mapSum.txt
+ awk 'FNR == 1{ print FILENAME }' "$sample"_sw.mapSum.txt >> mapSummary_HETH_SWTH.txt
+ cat "$sample"_sw.mapSum.txt >> mapSummary_HETH_SWTH.txt
+
+done
+
+for sample in *mapSum.txt; do awk 'FNR == 1{ print FILENAME } {printf "%-20s %-40s\n", $1, $3}' OFS="\t" $sample | awk '
+{
+    for (i=1; i<=NF; i++)  {
+        a[NR,i] = $i
+    }
+}
+NF>p { p = NF }
+END {
+    for(j=1; j<=p; j++) {
+        str=a[1,j]
+        for(i=2; i<=NR; i++){
+            str=str" "a[i,j];
+        }
+        print str
+    }
+}' >> mapSummary_HETH_SWTH.2.txt; done
+
+grep 'Z' mapSummary_HETH_SWTH.2.txt > mapSummary_HETH_SWTH.3.txt
+
+rm *_sw.mapSum.txt
+```
+
+&nbsp;
+
+scp map summary file to computer and put into Rstudio
+```{r, warning=FALSE, message=FALSE}
+msum <- read.table("~/Documents/clim_morph_HETH/mapSummary_HETH_SWTH.3.txt")
+
+colnames(msum) <- c("Sample", "QCpassedReads", "secondary", "supplementary", "duplicates", "mapped", "paired", "read1", "read2", "properlyPaired", "itselfYmateMapped", "singletons", "mateMappedDiffChr", "mateMappedDiffChr_mapQ5")
+
+msum <- msum %>% separate(Sample, c("Sample", "rg", "stuff", "file")) %>% dplyr::select(-rg, -stuff, -file) %>% distinct(Sample, .keep_all = TRUE) # need to remove duplicate samples in the file bc they were run twice and appended
+
+msum$percentMap <- (msum$mapped/msum$QCpassedReads)*100
+msum$percentPaired <- (msum$properlyPaired/msum$paired)*100
+msum$percentSingle <- (msum$singletons/msum$properlyPaired)*100
+
+# merge mapping summary with meta data
+#heth.meta2 <- inner_join(heth.meta1, msum)
+
+hist(msum$percentMap)
+
+msum %>% summarise(mean=mean(percentMap), sd=sd(percentMap))
+
+
+# merge mapping summary with meta data
+heth.meta2 <- inner_join(heth.meta1, msum)
+
+```
+
+&nbsp;
+
+## Mark duplicates
+sbatch file (~/scripts/markdups_HETH_SWTH.sbatch)
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash
+#SBATCH --job-name=mrkdup
+#SBATCH --output=mrkdup.%j.out
+#SBATCH --error=mrkdup.%j.err
+#SBATCH -t 48:00:00
+#SBATCH -p EM
+#number of nodes- for RM-shared -N 1
+#SBATCH -N 1
+#SBATCH --ntasks-per-node 24
+##SBATCH --mem=128G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH --mail-user=
+
+set -x
+
+sample=$1
+sample2=$2
+
+module load samtools/1.11.0
+module load GATK/4.1.9.0
+
+cd /ocean/projects/deb200006p/adamsne2/HETH/bwa_map/toSWTH
+
+java -jar /jet/home/adamsne2/programs/picard.jar MarkDuplicates \
+      I="$sample" \
+      O="$sample2".sw.mrkdup.bam \
+      M="$sample2".sw.mrkdup_metrics.txt
+
+samtools index "$sample2".sw.mrkdup.bam
+```
+
+&nbsp;
+
+loop to mark duplicates
+```{bash, eval=FALSE, message=FALSE}
+for sample in `ls *.bam`; do sample2=`ls $sample | cut -f1 -d'.'| cut -f1 -d"_"`; echo $sample; echo $sample2; sbatch ~/scripts/markdups_HETH_SWTH.sbatch $sample $sample2; done
+
+```
+
+&nbsp;
+
+Combine markdup metrics 
+Bash code to combine markdup metric summaries.
+```{bash, eval=FALSE, message=FALSE}
+touch toSWTH_mrkdup_metrics.txt
+
+for sample in *.sw.mrkdup_metrics.txt; do grep "^Unknown" $sample /dev/null >> toSWTH_mrkdup_metrics.txt; done
+```
+&nbsp;
+
+scp file to laptop
+
+&nbsp;
+
+Put combined metric summary into Rstudio
+```{r, warning=FALSE, message=FALSE}
+# Data input and wrangling
+dups <- as.data.frame(read_tsv("/Users/neasci/Documents/clim_morph_HETH/toSWTH_mrkdup_metrics.txt", col_names = FALSE))
+
+colnames(dups) <- c("LIBRARY", "UNPAIRED_READS_EXAMINED", "READ_PAIRS_EXAMINED", "SECONDARY_OR_SUPPLEMENTARY_RDS", "UNMAPPED_READS", "UNPAIRED_READ_DUPLICATES", "READ_PAIR_DUPLICATES", "READ_PAIR_OPTICAL_DUPLICATES", "PERCENT_DUPLICATION", "ESTIMATED_LIBRARY_SIZE")
+
+ dups <- dups %>% separate(LIBRARY, c("Sample", "stuff1", "stuff2", "stuff3", "file", "library1")) %>% subset(select=-c(stuff1, stuff2, stuff3, file, library1))
+ 
+ # combine with metadata
+ heth.meta3 <- inner_join(dups, heth.meta2)
+ 
+ p.dups <- ggplot(heth.meta3, aes(x=PERCENT_DUPLICATION, fill=Library)) + 
+  geom_histogram( alpha=0.5, show.legend = T) +
+  scale_fill_viridis_d( option = "cividis") +
+  theme_minimal() 
+ 
+ p.dups2 <- ggplot(heth.meta3, aes(x= percentMap, y=PERCENT_DUPLICATION, color=Library)) +
+   geom_point() +
+   scale_color_viridis_d( option = "cividis") +
+  theme_minimal() 
+ 
+dups.yr.p <- ggplot(heth.meta3, aes(x= Year, y=PERCENT_DUPLICATION, color=PERCENT_DUPLICATION)) +
+   geom_point(show.legend = FALSE) +
+   scale_color_viridis_c( option = "cividis") +
+  theme_minimal() 
+ 
+dups %>% summarise(mean=mean(PERCENT_DUPLICATION), sd=sd(PERCENT_DUPLICATION))
+
+ p.dups
+ dups.yr.p
+```
+
+&nbsp;
+
+## Estimate depth of coverage with Picard collect wgs
+Batch script to calculate coverage using Picard (collectWGSmetrics_HETH_SWTH.sbatch)
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash
+#SBATCH --job-name=wgsMetrics
+#SBATCH --output=wgs.%j.out
+#SBATCH --error=wgs.%j.err
+#SBATCH -t 24:00:00
+#SBATCH -p RM
+##SBATCH -N 1
+##SBATCH --ntasks 24
+##SBATCH --mem=120G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH --mail-user=
+
+module load GATK/4.1.9.0
+
+sample=$1
+sample2=$2
+
+#REFERENCE="/ocean/projects/deb200006p/adamsne2/HETH/reference/HETH.rmcont.assembly.fasta"
+REFERENCE="/ocean/projects/deb200006p/adamsne2/HETH/reference/GCF_009819885.2_bCatUst1.pri.v2_genomic.fna"
+
+cd /ocean/projects/deb200006p/adamsne2/HETH/bwa_map/toSWTH
+
+java -jar ~/programs/picard.jar CollectWgsMetrics\
+      I="$sample" \
+      O="$sample2".collectWGSmetrics.sw.txt \
+      R=$REFERENCE
+
+#touch HETH_005-6.collectWGSmetrics.txt
+#for sample in *collectWGSmetrics.txt; do awk 'FNR == 1 {print FILENAME}  FNR == 8 {print}' $sample >> HETH_005-6.collectWGSmetrics.txt; done
+```
+
+&nbsp;
+
+loop to get coverage
+```{bash, eval=FALSE, message=FALSE}
+for sample in *.sw.mrkdup.bam ; do sample2=`ls $sample | cut -f1 -d'.'| cut -f1 -d'_'`; echo $sample $sample2; sbatch ~/scripts/collectWGSmetrics_HETH_SWTH.sbatch $sample $sample2; done
+```
+
+&nbsp;
+
+Combine collectWGS metrics 
+Bash code to combine collectWGS metric summaries. code from (here)[https://stackoverflow.com/questions/42941329/how-can-i-print-the-nth-5th-line-of-every-file-preceded-by-the-filename-using]
+```{bash, eval=FALSE, message=FALSE}
+touch HETH_SWTH.collectWGSmetrics.txt
+
+for file in *collectWGSmetrics.sw.txt; do echo "$file" $(sed 's/ /,/;s/$/,/;8q;d' "$file") >> HETH_SWTH.collectWGSmetrics.txt; done
+```
+
+scp file to laptop
+
+&nbsp;
+
+Put combined collect metrics into R
+```{r, warning=FALSE, message=FALSE}
+wgs <- read_tsv("/Users/neasci/Documents/clim_morph_HETH/HETH_SWTH.collectWGSmetrics.txt", col_names = FALSE)
+
+# remove first line that says, "*collectWGSmetrics.txt"
+wgs <- wgs[-1,]
+
+wgs2 <- wgs %>% separate(X1, c("Sample", "GENOME_TERRITORY", "MEAN_COVERAGE", "SD_COVERAGE", "MEDIAN_COVERAGE", "MAD_COVERAGE", "PCT_EXC_ADAPTER", "PCT_EXC_MAPQ", "PCT_EXC_DUPE", "PCT_EXC_UNPAIRED", "PCT_EXC_BASEQ", "PCT_EXC_OVERLAP", "PCT_EXC_CAPPED", "PCT_EXC_TOTAL", "PCT_1X", "PCT_5X", "PCT_10X", "PCT_15X", "PCT_20X", "PCT_25X", "PCT_30X", "PCT_40X", "PCT_50X", "PCT_60X", "PCT_70X", "PCT_80X", "PCT_90X", "PCT_100X", "HET_SNP_SENSITIVITY", "HET_SNP_Q"), sep = '\\s')
+
+# remove file name and keep sample name
+wgs3 <- wgs2 %>% separate(Sample, c("Sample", "stuff1", "stuff2")) %>% dplyr::select(-stuff1, -stuff2) 
+
+# merge with meta data
+heth.meta4 <- inner_join(wgs3, heth.meta3)
+
+# convert character columns to numeric
+cols.num <- c("GENOME_TERRITORY", "MEAN_COVERAGE", "SD_COVERAGE", "MEDIAN_COVERAGE", "MAD_COVERAGE", "PCT_EXC_ADAPTER", "PCT_EXC_MAPQ", "PCT_EXC_DUPE", "PCT_EXC_UNPAIRED", "PCT_EXC_BASEQ", "PCT_EXC_OVERLAP", "PCT_EXC_CAPPED", "PCT_EXC_TOTAL", "PCT_1X", "PCT_5X", "PCT_10X", "PCT_15X", "PCT_20X", "PCT_25X", "PCT_30X", "PCT_40X", "PCT_50X", "PCT_60X", "PCT_70X", "PCT_80X", "PCT_90X", "PCT_100X", "HET_SNP_SENSITIVITY")
+
+heth.meta4[cols.num] <- sapply(heth.meta4[cols.num],as.numeric)
+
+wgs.tab <- t(as.data.frame(c(length(heth.meta4$Sample), mean(heth.meta4$MEAN_COVERAGE), sd(heth.meta4$MEAN_COVERAGE), mean(heth.meta4$PCT_5X)))) 
+colnames(wgs.tab) <- c("Samples", "Avg_meanCov","sd_meanCov", "Avg_pct5X")
+rownames(wgs.tab) <- c("HETH_005-006")
+wgs.tab2 <- as.data.frame(wgs.tab)
+
+wgs.tab2
+
+wgs.yr.p <- ggplot(heth.meta4, aes(x= Year, y=MEAN_COVERAGE, color=MEAN_COVERAGE)) +
+   geom_point(show.legend = FALSE) +
+   scale_color_viridis_c( option = "cividis") +
+  theme_minimal() 
+
+hist(heth.meta4$MEAN_COVERAGE)
+wgs.yr.p
+
+
+
+```
+
+&nbsp;
+
+Identify low coverage samples
+```{r, warning=FALSE, message=FALSE}
+low.cov <- heth.meta4 %>% filter(MEAN_COVERAGE < 2) %>% arrange(MEAN_COVERAGE)
+
+heth.meta4$lowCov <- ifelse(heth.meta4$MEAN_COVERAGE < 2, "low", "no")
+
+low.cov.p <- ggplot(heth.meta4, aes(x=percentMap, y=MEAN_COVERAGE, color=lowCov)) +
+  geom_point() +
+  scale_color_viridis_d(option = "cividis") +
+  theme_minimal()
+
+low.cov.p2 <- ggplot(heth.meta4, aes(x=`Raw reads`, y=MEAN_COVERAGE, color=MEAN_COVERAGE)) +
+  geom_point(show.legend = FALSE) +
+  scale_color_viridis_c(option = "cividis") +
+  theme_minimal()
+
+#low.cov.p
+#low.cov.p2
+
+low.cov %>% select(Sample, MEAN_COVERAGE, percentMap, PERCENT_DUPLICATION, Year) %>% arrange(MEAN_COVERAGE)
+```
+
+&nbsp;
+
+Definitely leave out sample Z448385 due to mean cov < 0.5.
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+# Getting genotype likelihoods for HETH samples
+
+&nbsp;
+
+make bamlists 
+```{bash, eval=FALSE}
+cd /ocean/projects/deb200006p/adamsne2/HETH/bwa_map/toSWTH
+
+# exclude Z448385 (low cov)
+ls *sw.mrkdup.bam | grep -v "Z448385" > HETH.SWTH.235.bamlist
+
+# exclude samples Tiffany ID'd as PCA outliers Z435185, Z438055, Z478178, Z488779, Z495843 from non-SWTH mapped PCA
+cat HETH.SWTH.235.bamlist | grep -v -E "Z435185|Z438055|Z478178|Z488779|Z495843" > HETH.SWTH.230.bamlist
+
+# exclude samples missing sex info: Z434750, Z446635, Z451910, Z494099, Z502947, Z504257, Z504258, Z504260, Z505595, Z507123, Z508928
+cat HETH.SWTH.230.bamlist | grep -v -E "Z434750|Z446635|Z451910|Z494099|Z502947|Z504257|Z504258|Z504260|Z505595|Z507123|Z508928" > HETH.SWTH.219.bamlist
+ 
+```
+
+&nbsp;
+
+make list of autosomes (remove sex chrs: chr W=CM020377.2/NC_046261.2, chr Z=CM020376.2/NC_046262.2, and mtDNA doesn't have a NC refSeq number but all scaffolds are "NW", and maybe "*")
+```{bash, eval=FALSE}
+# Get list of chr from bam file
+samtools idxstats Z507123.sw.mrkdup.bam > HETH_chrListA.txt
+cat HETH_chrListA.txt | cut -f 1 > HETH_chrListB.txt
+# add : to match region file format for ANGSD
+sed 's/$/:/' HETH_chrListB.txt > HETH_chrList.txt
+
+cat HETH_chrList.txt | grep -v "NC_046261.2" | grep -v "NC_046262.2" > HETH_chrList_nosex.txt
+cat HETH_chrList_nosex.txt | egrep -v '^NW_*' > HETH_chrList_autos.txt
+
+rm HETH_chrListA.txt
+rm HETH_chrListB.txt
+```
+
+&nbsp;
+
+## Get genotype liklihoods for all samples using ANGSD
+(~/scripts/angsd.GL_HETH_SWTH.sbatch)
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=angsdGL
+#SBATCH --output=gl.%j.out
+#SBATCH --error=gl.%j.err
+#SBATCH -t 48:00:00
+#SBATCH -p RM
+##SBATCH -N 1
+##SBATCH --ntasks-per-node 24
+#SBATCH --mem=128G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH --mail-user=
+
+
+set -x
+
+BL="HETH.SWTH.219.bamlist"
+
+REFERENCE="/ocean/projects/deb200006p/adamsne2/HETH/reference/GCF_009819885.2_bCatUst1.pri.v2_genomic.fna"
+FAI="/ocean/projects/deb200006p/adamsne2/HETH/reference/GCF_009819885.2_bCatUst1.pri.v2_genomic.fna.fai" 
+OUTDIR="/ocean/projects/deb200006p/adamsne2/HETH/analyses/toSWTH"
+outfile=$(echo $BL|sed 's/.bamlist//g')
+
+
+# beagle for gwas
+~/programs/angsd/angsd -bam $BL -P 14 -ref $REFERENCE \
+-rf HETH_chrList_nosex.txt \
+-trim 0 -uniqueOnly 1 -remove_bads 1 -only_proper_pairs 1 -skipTriallelic 1 \
+-minMapQ 20 -minQ 20 \
+-minInd 197 -minMaf 0.02 -SNP_pval 2e-6 \
+-doHWE 1 -maxHetFreq 0.5 \
+-GL 2 -doGlf 2 -doMaf 2 -doMajorMinor 1 -doCounts 1 \
+-out "$OUTDIR"/"$outfile"
+
+```
+
+&nbsp;
+
+## Get genotype liklihoods for Contemporary samples using ANGSD
+(~/scripts/angsd.GL_HETH_SWTH.sbatch)
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=angsdGL
+#SBATCH --output=gl.%j.out
+#SBATCH --error=gl.%j.err
+#SBATCH -t 48:00:00
+#SBATCH -p RM
+##SBATCH -N 1
+##SBATCH --ntasks-per-node 24
+#SBATCH --mem=128G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH --mail-user=
+
+
+set -x
+
+# beagle for contemporary 2005+ samples - 10% missing
+BL="contemp.2005.bamlist"
+
+
+REFERENCE="/ocean/projects/deb200006p/adamsne2/HETH/reference/GCF_009819885.2_bCatUst1.pri.v2_genomic.fna"
+FAI="/ocean/projects/deb200006p/adamsne2/HETH/reference/GCF_009819885.2_bCatUst1.pri.v2_genomic.fna.fai" 
+OUTDIR="/ocean/projects/deb200006p/adamsne2/HETH/analyses/toSWTH"
+outfile=$(echo $BL|sed 's/.bamlist//g')
+
+~/programs/angsd/angsd -bam $BL -P 128 -ref $REFERENCE \
+-rf HETH_chrList_noSex.txt \
+-trim 0 -uniqueOnly 1 -remove_bads 1 -only_proper_pairs 1 -skipTriallelic 1 \
+-minMapQ 20 -minQ 20 \
+-minInd 131 -minMaf 0.02 -SNP_pval 2e-6 \
+-doHWE 1 -maxHetFreq 0.5 \
+-GL 2 -doGlf 2 -doMaf 2 -doMajorMinor 1 -doCounts 1 \
+-out "$OUTDIR"/contemporary/"$outfile"
+```
+
+&nbsp;
+
+### Swap underscore for hypen in chromosome names 
+(~/scripts/swapUnforHyph.sbatch)
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=swap
+#SBATCH --output=swap.%j.out
+#SBATCH --error=swap.%j.err
+#SBATCH -t 2:00:00
+#SBATCH -p RM-shared
+#SBATCH -N 1
+##SBATCH --ntasks-per-node 10
+##SBATCH --mem=144G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH --mail-user=
+
+zcat HETH.SWTH.219.noSex.beagle.gz | sed 's/_/-/' | gzip > HETH.SWTH.219.noSex.noUn.beagle.gz
+
+
+zcat HETH_contemp.2005.beagle.gz | sed 's/_/-/' | gzip > HETH_contemp.2005.noUn.beagle.gz
+
+```

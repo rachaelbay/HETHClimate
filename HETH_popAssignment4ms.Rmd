@@ -1,0 +1,1251 @@
+---
+title: "HETH_popAssignment_7-21-2021"
+author: "Nicole Adams"
+date: "7/21/2021"
+output: 
+  html_document:
+    toc: true
+    code_folding: show
+---
+
+# HETH Population Assignment
+Since there is population structure within HETH, we have to assign each of our individuals to a genetic region.
+
+&nbsp;
+
+![HETH genoscape (Alvarado)](/Users/neasci/Documents/clim_morph_HETH/HETH_genoscape_2024.png){#id .class width=75% height=75%}
+
+&nbsp;
+&nbsp;
+
+# Process Teresa's HETH samples
+The HETH genoscape has a sample gap in the upper Midwest and central Canada. Luckily, Teresa Pegan from Ben Winger's lab has genomes from HETH collected in that area. Teresa generously shared her .fastq files (N=38) with me via Globus file transfer for our pop assignment analysis. Teresa also sent me a metadata file for the samples (Sequencing_metadata_for_Nicole.csv). Teresa said two samples failed the sequencing, UP17003 and MB19010 and not to use them in the analysis.
+
+&nbsp;
+
+On Xsede, move files out of individual directories: 
+
+&nbsp;
+
+```{bash, eval=FALSE}
+cp /ocean/projects/deb200006p/adamsne2/HETH/teresaPegan_files/*/*.gz /ocean/projects/deb200006p/adamsne2/HETH/teresaPegan_files/ 
+ 
+# rm fastq files from w/in directories 
+rm */*.fq.gz 
+```
+
+&nbsp;
+&nbsp;
+
+## Trim fastqs
+Remove any adapters and trim raw reads based on read length and quality using Trim Galore!
+
+&nbsp;
+
+Trimming sbatch file (~/scripts/trimgalore_HETH.sbatch)
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=TRIM
+#SBATCH --output=TRIM.%j.out
+#SBATCH --error=TRIM.%j.err
+#SBATCH -t 48:00:00
+#SBATCH -p RM-shared
+##SBATCH -N 1
+##SBATCH --mem=128G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH  --mail-user=
+
+set -x
+
+module load FastQC/0.11.9
+module load cutadapt/2.10
+module load python/3.8.6
+
+###Identify directories
+#fastq="/ocean/projects/deb200006p/adamsne2/HETH/raw_data/usftp21.novogene.com/raw_data"
+fastq="/ocean/projects/deb200006p/adamsne2/HETH/teresaPegan_files"
+num=$2
+sample=$1
+
+#Note: Take a look at the names of the sample files and adjust this loop accordingly
+#For example, mine all had "CKDL190142674-1a-AK12626-AK16295_H3VF5CCX2_L8_2.fq.gz" or "USPD16094205-N707-AK392_HY5K5CCXY_L7_2.fq.gz" tacked on.
+
+### Trim low quality fragments and Illumina TruSeq adapters (-q = quality, --cores 1-4 python3 uses 2)
+#mkdir ../trimd
+#cd ../trimd
+
+# leave adapters blank so uses the auto-detect
+# My HETH samples
+#/jet/home/adamsne2/programs/TrimGalore-0.6.5/trim_galore -q 15 --paired --fastqc \
+#$fastq/$sample\_L3_1.fq.gz $fastq/$sample\_L3_2.fq.gz
+
+# for teresa's files for HETH assignment
+/jet/home/adamsne2/programs/TrimGalore-0.6.5/trim_galore -q 15 --paired --fastqc \
+$fastq/$sample\_L1_1.fq.gz $fastq/$sample\_L1_2.fq.gz
+```
+
+&nbsp;
+
+Trim all samples by lane (L1, L2)
+```{bash, eval=FALSE}
+for sample in `ls *_L1_1.fq.gz | cut -f1,2,3 -d '_'`; do echo $sample; sbatch ~/scripts/trimgalore_HETH.sbatch $sample; done 
+ 
+for sample in `ls *_L2_1.fq.gz | cut -f1,2,3 -d '_'`; do echo $sample; sbatch ~/scripts/trimgalore_HETH2.sbatch $sample; done 
+```
+
+&nbsp;
+&nbsp;
+
+## Mapping
+Use bwa mem (included -M parameter for compatibility with picard)
+
+&nbsp;
+
+Mapping sbatch file (~/scripts/map.bwa_HETH.teresa.sbatch)
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=map_bwa
+#SBATCH --output=map-bwa.%j.out
+#SBATCH --error=map-bwa.%j.err
+#SBATCH -t 48:00:00
+#SBATCH -p EM
+##SBATCH -N 1
+#SBATCH --ntasks-per-node 24
+##SBATCH --mem=128G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH  --mail-user=
+
+set -x
+
+
+module load BWA/0.7.3a
+module load samtools/1.11.0
+module load picard/2.23.2
+
+##Variables: Plate number and directory for bamUtil
+PLATE="teresa"
+BAMUTIL="/jet/home/adamsne2/programs/bamUtil/bin"
+REFERENCE="/ocean/projects/deb200006p/adamsne2/HETH/reference/HETH.rmcont.assembly.fasta"
+lane=$2
+sample=$1
+sample2=$3
+
+
+cd /ocean/projects/deb200006p/adamsne2/HETH/teresaPegan_files/
+
+##Align each sample to genome. Note that genome reference must already be built through bwa
+#mkdir ../../../bwa_map
+
+ID="$PLATE.$sample2.$lane"
+
+##map trimmed reads BY lane
+bwa mem -t 20 -M $REFERENCE "$sample"_1_val_1.fq.gz "$sample"_2_val_2.fq.gz > /ocean/projects/deb200006p/adamsne2/HETH/bwa_map/"$sample2".sam
+
+cd /ocean/projects/deb200006p/adamsne2/HETH/bwa_map/
+
+#########sort, add read group information and index it#########
+samtools sort -o "$sample2".bam "$sample2".sam -@ 10
+samtools index "$sample2".bam -@10
+
+##Add read groups
+java -jar /jet/home/adamsne2/programs/picard.jar AddOrReplaceReadGroups INPUT="$sample2".bam RGID="$ID" RGLB="$PLATE" RGPL=illumina RGPU="$PLATE"."$sample2"."lane" RGSM="$sample2" OUTPUT="$sample2"_RG.bam VALIDATION_STRINGENCY=SILENT 
+
+samtools index "$sample2"_RG.bam -@10
+
+
+rm "$sample2".sam
+```
+
+&nbsp;
+
+Map loop for all samples by lane (L1, L2)
+```{bash, eval=FALSE}
+for sample in `ls *L1_1_val_1.fq.gz | cut -f1,2,3,4 -d'_'`; do lane=`ls $sample\_1_val_1.fq.gz | cut -f4 -d"_"`; sample2=`ls $sample\_1_val_1.fq.gz | cut -f1 -d'_'`; echo $sample; echo $lane;echo $sample2; sbatch ~/scripts/map.bwa_HETH.teresa.sbatch $sample $lane $sample2; done 
+ 
+for sample in `ls *L2_1_val_1.fq.gz | cut -f1,2,3,4 -d'_'`; do lane=`ls $sample\_1_val_1.fq.gz | cut -f4 -d"_"`; sample2=`ls $sample\_1_val_1.fq.gz | cut -f1 -d'_'`; echo $sample; echo $lane;echo $sample2; sbatch ~/scripts/map.bwa_HETH.teresa.sbatch $sample $lane $sample2; done 
+```
+
+&nbsp;
+
+Mapping summaries
+Bash commands for samtools flagstat to get mapping summaries. Then take the results and make a table and combine into one file to be put into Rstudio.
+
+&nbsp;
+
+batch file (~/scripts/sam.flagstat_HETH.teresa.sbatch)
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=map_sum
+#SBATCH --output=map-sum.%j.out
+#SBATCH --error=map-sum.%j.err
+#SBATCH -t 24:00:00
+#SBATCH -p RM-shared
+##SBATCH -N 1
+##SBATCH --ntasks-per-node 24
+##SBATCH --mem=128G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH  --mail-user=
+
+set -x
+
+
+module load samtools/1.11.0
+
+#cd /ocean/projects/deb200006p/adamsne2/HETH/bwa_map
+
+touch mapSummary_HETH_teresa.txt
+
+for sample in `ls *_RG.bam | cut -f1 -d'.'`
+do
+  samtools flagstat "$sample".bam -@ 10  > "$sample"_mapSum.txt
+ awk 'FNR == 1{ print FILENAME }' "$sample"_mapSum.txt >> mapSummary_HETH_teresa.txt
+ cat "$sample"_mapSum.txt >> mapSummary_HETH_teresa.txt
+
+done
+
+for sample in *mapSum.txt; do awk 'FNR == 1{ print FILENAME } {printf "%-20s %-40s\n", $1, $3}' OFS="\t" $sample | awk '
+{
+    for (i=1; i<=NF; i++)  {
+        a[NR,i] = $i
+    }
+}
+NF>p { p = NF }
+END {
+    for(j=1; j<=p; j++) {
+        str=a[1,j]
+        for(i=2; i<=NR; i++){
+            str=str" "a[i,j];
+        }
+        print str
+    }
+}' >> mapSummary_HETH_teresa.2.txt; done
+
+rm *_mapSum.txt
+```
+
+&nbsp;
+
+scp map summary file to computer and do one more formatting step
+```{bash, eval=FALSE}
+grep '[[:alpha:]]' mapSummary_HETH_teresa.2.txt > mapSummary_HETH_teresa.3.txt 
+```
+
+&nbsp;
+
+Load in R libraries
+```{r, warning=FALSE, message=FALSE}
+library(readxl)
+library(data.table)
+library(tidyverse)
+library(viridis)
+library(cowplot)
+library(ggpubr) 
+library(knitr)
+library(kableExtra)
+library(RColorBrewer)
+library(scales)
+```
+
+&nbsp;
+
+Load in Teresa's metadata
+```{r, warning=FALSE, message=FALSE}
+meta.t <- read.csv("~/Documents/clim_morph_HETH/teresaPegan_HETHfiles/Sequencing_metadata_for_Nicole.csv")
+
+meta.t <- meta.t %>% dplyr::select(-X)
+
+meta.t$Sample <- meta.t$Novogene_Sample_Name
+
+meta.t$Long <- meta.t$Lon
+```
+
+&nbsp;
+
+```{r, warning=FALSE, message=FALSE}
+msum.t <- read.table("~/Documents/clim_morph_HETH/mapSummary_HETH_teresa.3.txt")
+
+colnames(msum.t) <- c("Sample", "QCpassedReads", "secondary", "supplementary", "duplicates", "mapped", "paired", "read1", "read2", "properlyPaired", "itselfYmateMapped", "singletons", "mateMappedDiffChr", "mateMappedDiffChr_mapQ5")
+
+msum.t <- msum.t %>% separate(Sample, c("Sample", "rg", "stuff", "file")) %>% dplyr::select(-rg, -stuff, -file)
+
+msum.t$percentMap <- (msum.t$mapped/msum.t$QCpassedReads)*100
+msum.t$percentPaired <- (msum.t$properlyPaired/msum.t$paired)*100
+msum.t$percentSingle <- (msum.t$singletons/msum.t$properlyPaired)*100
+
+# merge mapping summary with meta data
+meta.t2 <- inner_join(meta.t, msum.t)
+
+
+hist(msum.t$percentMap)
+
+```
+
+&nbsp;
+
+Average mapping is 95.2% (85.7% for proper pairs), which is lower than the HETH samples for GWAS...
+
+&nbsp;
+&nbsp;
+
+## Mark Duplicates
+sbatch file (~/scripts/markdups_HETH.sbatch)
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=mrkdup
+#SBATCH --output=mrkdup.%j.out
+#SBATCH --error=mrkdup.%j.err
+#SBATCH -t 48:00:00
+#SBATCH -p EM
+##SBATCH -N 1
+#SBATCH --ntasks-per-node 24
+##SBATCH --mem=128G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH  --mail-user=
+
+
+set -x
+
+sample=$1
+sample2=$2
+
+module load samtools/1.11.0
+module load GATK/4.1.9.0
+
+#cd /ocean/projects/deb200006p/adamsne2/HETH/bwa_map
+
+java -jar /jet/home/adamsne2/programs/picard.jar MarkDuplicates \
+      I="$sample" \
+      O="$sample2".mrkdup.bam \
+      M="$sample2".mrkdup_metrics.txt
+
+samtools index "$sample2".mrkdup.bam
+```
+
+&nbsp;
+
+loop to submit mark duplicates
+```{bash, eval=FALSE}
+for sample in `ls *_RG.bam`; do sample2=`ls $sample | cut -f1 -d'.'| cut -f1,2 -d"_"`; echo $sample; echo $sample2; sbatch ~/scripts/markdups_HETH.sbatch $sample $sample2; done 
+```
+
+&nbsp;
+
+Combine markdup metrics 
+Bash code to combine markdup metric summaries
+```{bash, eval=FALSE}
+touch HETH_teresa_mrkdup_metrics.txt
+
+for sample in *RG.mrkdup_metrics.txt; do grep "^teresa" $sample /dev/null >> HETH_teresa_mrkdup_metrics.txt; done
+```
+
+&nbsp;
+
+scp file to laptop then put combined metric summary into Rstudio
+```{r, warning=FALSE, message=FALSE}
+# Data input and wrangling
+dups.t <- as.data.frame(read_tsv("/Users/neasci/Documents/clim_morph_HETH/HETH_teresa_mrkdup_metrics.txt", col_names = FALSE))
+
+colnames(dups.t) <- c("LIBRARY", "UNPAIRED_READS_EXAMINED", "READ_PAIRS_EXAMINED", "SECONDARY_OR_SUPPLEMENTARY_RDS", "UNMAPPED_READS", "UNPAIRED_READ_DUPLICATES", "READ_PAIR_DUPLICATES", "READ_PAIR_OPTICAL_DUPLICATES", "PERCENT_DUPLICATION", "ESTIMATED_LIBRARY_SIZE")
+
+ dups.t <- dups.t %>% separate(LIBRARY, c("Sample", "stuff1", "stuff2", "stuff3", "file", "library1")) %>% subset(select=-c(stuff1, stuff2, stuff3, file, library1))
+ 
+ # combine with metadata
+ meta.t3 <- inner_join(meta.t2, dups.t)
+ 
+ p.dups.t <- ggplot(meta.t3, aes(x=PERCENT_DUPLICATION, fill=as.factor(Plate_number))) + 
+  geom_histogram( alpha=0.5, show.legend = T) +
+  scale_fill_viridis(discrete = T, option = "cividis") +
+  theme_minimal() 
+ 
+ p.dups.t2 <- ggplot(meta.t3, aes(x= percentMap, y=PERCENT_DUPLICATION, color=as.factor(Plate_number))) +
+   geom_point() +
+   scale_color_viridis(discrete = T, option = "cividis") +
+  theme_minimal() 
+ 
+ p.dups.t
+
+```
+
+&nbsp;
+&nbsp;
+
+## Estimate depth of coverage with Picard collect wgs
+Batch script to calculate coverage using Picard (collectWGSmetrics_HETH.sbatch)
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=wgsMetrics
+#SBATCH --output=wgs.%j.out
+#SBATCH --error=wgs.%j.err
+#SBATCH -t 48:00:00
+#SBATCH -p EM
+##SBATCH -N 1
+#SBATCH --ntasks 24
+##SBATCH --mem=120G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH  --mail-user=
+
+set -x
+
+
+module load GATK/4.1.9.0
+
+RGbam=$1
+sample=$2
+sampleRG=$3
+
+REFERENCE="/ocean/projects/deb200006p/adamsne2/HETH/reference/HETH.rmcont.assembly.fasta"
+
+cd /ocean/projects/deb200006p/adamsne2/HETH/bwa_map
+
+java -jar /jet/home/adamsne2/programs/picard.jar CollectWgsMetrics\
+      I="$sampleRG".mrkdup.bam \
+      O="$sample".collectWGSmetrics.txt \
+      R=$REFERENCE 
+
+
+#touch HETH_005-6.collectWGSmetrics.txt
+#for sample in *collectWGSmetrics.txt; do awk 'FNR == 1 {print FILENAME}  FNR == 8 {print}' $sample >> HETH_005-6.collectWGSmetrics.txt; done
+
+
+```
+
+&nbsp;
+
+loop to get coverage
+```{bash, eval=FALSE}
+for RGbam in *RG.bam ; do sample=`ls $RGbam | cut -f1 -d'.'| cut -f1 -d'_'`;  sampleRG=`ls $RGbam | cut -f1 -d'.'`; echo $RGbam $sample $sampleRG; sbatch ~/scripts/collectWGSmetrics_HETH.teresa.sbatch $RGbam $sample $sampleRG; done 
+```
+
+&nbsp;
+
+Combine collectWGS metrics 
+Bash code to combine collectWGS metric summaries. code from (here)[https://stackoverflow.com/questions/42941329/how-can-i-print-the-nth-5th-line-of-every-file-preceded-by-the-filename-using]
+```{bash, eval=FALSE}
+touch HETH_teresa.collectWGSmetrics.txt
+
+for file in *_RG.bam; do sample=`ls $file | cut -f1 -d'.'| cut -f1 -d"_"`; echo "$sample".collectWGSmetrics.txt $(sed 's/ /,/;s/$/,/;8q;d' "$sample".collectWGSmetrics.txt) >> HETH_teresa.collectWGSmetrics.txt; done 
+```
+
+scp file to laptop
+
+&nbsp;
+
+Put combined collect metrics into R
+```{r, warning=FALSE, message=FALSE}
+wgs.t <- as.data.frame(read_tsv("/Users/neasci/Documents/clim_morph_HETH/HETH_teresa.collectWGSmetrics.txt", col_names = FALSE))
+
+wgs.t2 <- wgs.t %>% separate(X1, c("Sample", "GENOME_TERRITORY", "MEAN_COVERAGE", "SD_COVERAGE", "MEDIAN_COVERAGE", "MAD_COVERAGE", "PCT_EXC_ADAPTER", "PCT_EXC_MAPQ", "PCT_EXC_DUPE", "PCT_EXC_UNPAIRED", "PCT_EXC_BASEQ", "PCT_EXC_OVERLAP", "PCT_EXC_CAPPED", "PCT_EXC_TOTAL", "PCT_1X", "PCT_5X", "PCT_10X", "PCT_15X", "PCT_20X", "PCT_25X", "PCT_30X", "PCT_40X", "PCT_50X", "PCT_60X", "PCT_70X", "PCT_80X", "PCT_90X", "PCT_100X", "HET_SNP_SENSITIVITY", "HET_SNP_Q"), sep = '\\s')
+
+# remove file name and keep sample name
+wgs.t3 <- wgs.t2 %>% separate(Sample, c("Sample", "stuff1", "stuff2")) %>% dplyr::select(-stuff1, -stuff2) 
+
+# merge with meta data
+ meta.t4 <- inner_join(meta.t3, wgs.t3)
+
+# convert character columns to numeric
+cols.num <- c("GENOME_TERRITORY", "MEAN_COVERAGE", "SD_COVERAGE", "MEDIAN_COVERAGE", "MAD_COVERAGE", "PCT_EXC_ADAPTER", "PCT_EXC_MAPQ", "PCT_EXC_DUPE", "PCT_EXC_UNPAIRED", "PCT_EXC_BASEQ", "PCT_EXC_OVERLAP", "PCT_EXC_CAPPED", "PCT_EXC_TOTAL", "PCT_1X", "PCT_5X", "PCT_10X", "PCT_15X", "PCT_20X", "PCT_25X", "PCT_30X", "PCT_40X", "PCT_50X", "PCT_60X", "PCT_70X", "PCT_80X", "PCT_90X", "PCT_100X", "HET_SNP_SENSITIVITY")
+
+meta.t4[cols.num] <- sapply(meta.t4[cols.num],as.numeric)
+
+wgs.t.tab <- t(as.data.frame(c(length(meta.t4$Sample), mean(meta.t4$MEAN_COVERAGE), mean(meta.t4$PCT_5X)))) 
+colnames(wgs.t.tab) <- c("Samples", "Avg_meanCov", "Avg_pct5X")
+rownames(wgs.t.tab) <- c("HETH_teresa")
+wgs.t.tab2 <- as.data.frame(wgs.t.tab)
+
+wgs.t.tab2
+
+hist(meta.t4$MEAN_COVERAGE)
+
+```
+
+&nbsp;
+
+Average coverage is 2.5x, which is also lower than the other HETH samples for GWAS, but not by much...
+
+&nbsp;
+
+Identify low coverage samples
+```{r, warning=FALSE, message=FALSE}
+low.cov.t <- meta.t4 %>% filter(MEAN_COVERAGE < 2) %>% arrange(MEAN_COVERAGE)
+
+low.cov.t %>% dplyr::select(Sample, MEAN_COVERAGE, percentMap, PERCENT_DUPLICATION) %>% arrange(MEAN_COVERAGE)
+```
+
+&nbsp;
+
+The two previously identified failed samples (UP17003, MB19010) have the lowest coverage (< 0.01x). The other low cov samples range from 1.6-1.9x.
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+# Call SNPs for population assignment
+## Identify SNPs
+We are calling SNPs using the Ruegg lab RADseq sites for HETH to assign individuals.
+
+&nbsp;
+
+Downloaded the RAD sites VCF file from the Bird Genoscape Google Drive 
+BGP_Data_Share/Large_SNP_files/HETH/HETH.all.clean.hethv0.rm_hets.rmrel.rmcont.vcf and put it in the HETH reference directory /ocean/projects/deb200006p/adamsne2/HETH/reference/
+ 
+&nbsp;
+
+Count the number of SNPs in the RADseq VCF
+```{bash, eval=FALSE}
+grep -v "#" HETH.all.clean.hethv0.rm_hets.rmrel.rmcont.vcf |wc -l 
+
+```
+
+90,439 SNPs
+
+&nbsp;
+
+The RAD sites VCF file had the prefix "scaf_" for every scaffold. I removed that so it would match the bam files, which didn't have any prefix
+```{bash, eval=FALSE}
+# remove 'scaf_' and create new file
+awk '{gsub(/scaf_/,""); print}' HETH.all.clean.hethv0.rm_hets.rmrel.rmcont.vcf > HETH.all.clean.hethv0.rm_hets.rmrel.rmcont_rmscaf.vcf 
+
+# compress (bgzip) and index (tabix) new VCF for downstream compatability
+~/programs/ngsTools/htslib/bgzip -c -@ 10 HETH.all.clean.hethv0.rm_hets.rmrel.rmcont_rmscaf.vcf > HETH.all.clean.hethv0.rm_hets.rmrel.rmcont_rmscaf.vcf.gz 
+
+~/programs/ngsTools/htslib/tabix HETH.all.clean.hethv0.rm_hets.rmrel.rmcont_rmscaf.vcf.gz 
+
+```
+
+&nbsp;
+&nbsp;
+
+## Call variants with bcftools
+I originally tried to call SNPs with GATK but it ended up taking forever so I switched to bcftools, but before that I added read groups to the bams. GATK requires bams to have unique read groups, so I had to add read groups to our HETH bams, I already included it in Teresa's HETHs.
+
+&nbsp;
+
+I used the original HETH mapping script so it gets all the file info and just comment out all the other steps besides the add read groups then added mrkdups to the name because I had already marked the duplicates
+
+&nbsp;
+
+Modified batch script to add read groups (~/scripts/map.bwa_HETH.mrkdup.sbatch)
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=map_bwa
+#SBATCH --output=map-bwa.%j.out
+#SBATCH --error=map-bwa.%j.err
+#SBATCH -t 48:00:00
+#SBATCH -p RM-shared
+##SBATCH -N 1
+##SBATCH --ntasks-per-node 24
+##SBATCH --mem=128G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH  --mail-user=
+
+set -x
+
+
+module load BWA/0.7.3a
+module load samtools/1.11.0
+module load picard/2.23.2
+
+##Variables: Plate number and directory for bamUtil
+PLATE="HETH_006"
+BAMUTIL="/jet/home/adamsne2/programs/bamUtil/bin"
+REFERENCE="/ocean/projects/deb200006p/adamsne2/HETH/reference/HETH.rmcont.assembly.fasta"
+lane=$2
+sample=$1
+sample2=$3
+
+
+#cd /ocean/projects/deb200006p/adamsne2/HETH/raw_data/usftp21.novogene.com/trimd/
+
+##Align each sample to genome. Note that genome reference must already be built through bwa
+#mkdir ../../../bwa_map
+
+ID="$PLATE.$sample2.$lane"
+
+##map trimmed reads BY lane
+#bwa mem -t 20 -M $REFERENCE "$sample"_1_val_1.fq.gz "$sample"_2_val_2.fq.gz > /ocean/projects/deb200006p/adamsne2/HETH/bwa_map/"$sample2".sam
+
+cd /ocean/projects/deb200006p/adamsne2/HETH/bwa_map/
+
+#########sort, add read group information and index it#########
+#samtools sort -o "$sample2".bam "$sample2".sam -@ 10
+#samtools index "$sample2".bam -@10
+
+##Add read groups (dont do this for HETH)
+java -jar /jet/home/adamsne2/programs/picard.jar AddOrReplaceReadGroups INPUT="$sample2".mrkdup.bam RGID="$ID" RGLB="$PLATE" RGPL=illumina RGPU="$PLATE"."$sample2"."lane" RGSM="$sample2" OUTPUT="$sample2"_RG.mrkdup.bam VALIDATION_STRINGENCY=SILENT 
+
+samtools index "$sample2"_RG.mrkdup.bam -@10
+
+
+#rm "$sample2".sam
+```
+
+&nbsp;
+
+Loop to add read groups by lane (L3=HETH_005, L4=HETH_006)
+```{bash, eval=FALSE}
+for sample in `ls *L3_1_val_1.fq.gz | cut -f1,2,3,4 -d'_'`; do lane=`ls $sample\_1_val_1.fq.gz | cut -f4 -d"_"`; sample2=`ls $sample\_1_val_1.fq.gz | cut -f1 -d'_'`; echo $sample; echo $lane;echo $sample2; sbatch ~/scripts/map.bwa_HETH.mrkdup.sbatch $sample $lane $sample2; done 
+ 
+for sample in `ls *L4_1_val_1.fq.gz | cut -f1,2,3,4 -d'_'`; do lane=`ls $sample\_1_val_1.fq.gz | cut -f4 -d"_"`; sample2=`ls $sample\_1_val_1.fq.gz | cut -f1 -d'_'`; echo $sample; echo $lane;echo $sample2; sbatch ~/scripts/map.bwa_HETH.mrkdup.sbatch $sample $lane $sample2; done 
+```
+
+&nbsp;
+
+### Prepare files for genotyping
+
+&nbsp;
+
+#### sort and index bams for bcftools
+sbatch script (~/scripts/sam.sort.sbatch)
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=sam.sort
+#SBATCH --output=sort.%j.out
+#SBATCH --error=sort.%j.err
+#SBATCH -t 48:00:00
+#SBATCH -p RM-shared
+##SBATCH -N 1
+##SBATCH --ntasks-per-node 24
+##SBATCH --mem=128G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH  --mail-user=
+
+set -x
+
+module load samtools/1.13.0
+
+sample=$1
+sample2=$2
+
+samtools sort $sample -@ 5 -o "$sample2".srt.bam
+
+samtools index "$sample2".srt.bam 
+```
+
+&nbsp;
+
+Loop over bams
+```{bash, eval=FALSE}
+for sample in *.mrkdup.bam; do sample2=`ls $sample | cut -f1,2 -d'.'`; echo $sample $sample2; sbatch ~/scripts/sam.sort.sbatch $sample $sample2; done
+```
+
+&nbsp;
+
+#### Create a positions file for samtools from the RAD vcf
+```{bash, eval=FALSE}
+module load bcftools/1.10.2  
+
+bcftools query -f '%CHROM  %POS\n' HETH.all.clean.hethv0.rm_hets.rmrel.rmcont_rmscaf.vcf > HETH.all.clean.hethv0.rm_hets.rmrel.rmcont_rmscaf.pos 
+```
+
+&nbsp;
+
+#### Make a bamlist for bcftools excluding failed samples
+```{bash, eval=FALSE}
+ls *_RG.mrkdup.srt.bam > HETH.4assignment.bamlist 
+ 
+grep -v -E 'Z448385_RG.mrkdup.srt.bam|UP17003_RG.mrkdup.srt.bam|MB19010_RG.mrkdup.srt.bam' HETH.4assignment.bamlist > HETH.rmfail.4assignment.bamlist 
+```
+
+&nbsp;
+
+### Call SNPs with bcftools mpileup followed by bcftools call [replaced samtools mpileup]
+sbatch script (~/scripts/mpileup.sbatch)
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=mpile
+#SBATCH --output=mpile.%j.out
+#SBATCH --error=mpile.%j.err
+#SBATCH -t 48:00:00
+#SBATCH -p RM-shared
+##SBATCH -N 1
+##SBATCH --ntasks-per-node 24
+##SBATCH --mem=128G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH  --mail-user=
+
+set -x
+
+
+#cd /ocean/projects/deb200006p/adamsne2/HETH/bwa_map/
+
+#module load samtools/
+module load bcftools/1.10.2
+
+REFERENCE="/ocean/projects/deb200006p/adamsne2/HETH/reference/HETH.rmcont.assembly.fasta"
+SITES="/ocean/projects/deb200006p/adamsne2/HETH/reference/HETH.all.clean.hethv0.rm_hets.rmrel.rmcont_rmscaf.pos"
+BAMS="/ocean/projects/deb200006p/adamsne2/HETH/bwa_map/HETH.rmfail.4assignment.bamlist"
+
+# bcftools mpileup is now used over samtools mpileup
+bcftools mpileup -f $REFERENCE --bam-list $BAMS --regions-file $SITES --min-MQ 20 --max-depth 100 | bcftools call -mv -Ob -o HETH.4assign.bcf
+
+# convert bcf to vcf
+bcftools view -Oz HETH.4assign.bcf -o HETH.4assign.vcf.gz
+
+```
+
+&nbsp;
+&nbsp;
+
+## PCA using SNPRelate in R
+Following the SNPRelate [tutorial](https://www.bioconductor.org/packages/release/bioc/vignettes/SNPRelate/inst/doc/SNPRelate.html#format-conversion-from-vcf-files)
+
+&nbsp;
+
+Combine metadata for our HETH + teresa's HETH samples
+```{r, warning=FALSE, message=FALSE}
+## our HETH samples
+# sample metadata
+meta1a <- read_excel("~/Documents/clim_morph_HETH/HETH_WGLC_005&006_libprep.xlsx", sheet = "Lib Prep")
+meta1a$Sample_og <- meta1a$Sample
+meta1a$Sample1 <- "Z"
+meta1 <- meta1a %>% unite("Sample", Sample1:Sample_og, sep = "")
+
+# sample seq data for Novogene
+meta2 <- read_excel("~/Documents/clim_morph_HETH/HETH_SIFLIB.xlsx")
+colnames(meta2) <- c("LibraryType", "Library", "Sample", "DataDelivery", "index_i7", "index_i5", "insertSz", "Status", "totalData", "dataUnit", "conc", "volume")
+meta2 <- meta2 %>% dplyr::select(Sample, Library, index_i7, index_i5, insertSz, conc, volume)
+meta12 <- full_join(meta1, meta2)
+
+# raw seq results from Novogene
+meta3 <- read_tsv("~/Documents/clim_morph_HETH/HETH_qc.summary_final.txt")
+meta3 <- meta3 %>% filter(!Sample =="Undetermined")
+
+# combine our Novogene data
+heth.meta1 <- full_join(meta12, meta3) 
+heth.meta1$Population <- "IL"
+heth.meta1$Lat <- 41.8663
+heth.meta1$Long <- -87.616981
+
+# COMBINE with teresa HETHs
+heth.all <- full_join(heth.meta1, meta.t4) 
+
+# remove failed samples
+heth.all.rm <- heth.all %>% filter(!Sample =="Z448385" & !Sample =="UP17003" & !Sample =="MB19010")
+```
+
+&nbsp;
+
+### vcf stats
+```{r, warning=FALSE, message=FALSE}
+heth.miss <- read.table("~/Documents/clim_morph_HETH/HETH.4assign.miss.imiss", header = TRUE)
+heth.af <- read_delim("~/Documents/clim_morph_HETH/HETH.4assign.af.frq", delim = "\t",
+                       col_names = c("chr", "pos", "nalleles", "nchr", "a1", "a2"), skip = 1)
+heth.q <- read.table("~/Documents/clim_morph_HETH/HETH.4assign.siteQ.lqual", header=TRUE)
+
+# plot qual
+qual.p <- ggplot(heth.q, aes(QUAL)) + geom_density(fill = "dodgerblue1", colour = "black", alpha = 0.3)
+qual.p + theme_light()
+
+# good qual, set qual filter to 30
+
+# plot missingness
+miss.p <- ggplot(heth.miss, aes(F_MISS)) + geom_density(fill = "dodgerblue1", colour = "black", alpha = 0.3)
+miss.p + theme_light()
+summary(heth.miss$F_MISS)
+
+# fairly high missingness overall
+
+# find minor allele frequency
+heth.af$maf <- heth.af %>% select(a1, a2) %>% apply(1, function(z) min(z))
+af.p <- ggplot(heth.af, aes(maf)) + geom_density(fill = "dodgerblue1", colour = "black", alpha = 0.3)
+af.p + theme_light()
+summary(heth.af$maf)
+
+# maybe set a higher maf filter like 0.05?
+```
+
+&nbsp;
+
+## Filter VCF
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=filtVCF
+#SBATCH --output=filtVCF.%j.out
+#SBATCH --error=filtVCF.%j.err
+#SBATCH -t 24:00:00
+#SBATCH -p RM-shared
+##SBATCH -N 1
+##SBATCH --ntasks-per-node 24
+##SBATCH --mem=128G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH  --mail-user=
+
+set -x
+
+
+#cd /ocean/projects/deb200006p/adamsne2/HETH/vcfs/
+
+#module load bcftools/1.10.2
+module load vcftools/0.1.16
+
+REFERENCE="/ocean/projects/deb200006p/adamsne2/HETH/reference/HETH.rmcont.assembly.fasta"
+SITES="/ocean/projects/deb200006p/adamsne2/HETH/reference/HETH.all.clean.hethv0.rm_hets.rmrel.rmcont_rmscaf.pos"
+VCF="/ocean/projects/deb200006p/adamsne2/HETH/vcfs/HETH.4assign.vcf.gz"
+
+# try filtering with vcftools
+vcftools --gzvcf $VCF --remove-indels --maf 0.05 --max-missing 0.9 --minQ 30 --minDP 3 --maxDP 50 --recode --stdout | ~/programs/ngsTools/htslib/bgzip -c > HETH.4assign.flt.vcf.gz
+
+```
+
+&nbsp;
+
+### PCA using SNPRelate of filtered HETH (this study and Teresa's) VCF
+N=271, SNPs=36550
+```{r, warning=FALSE, message=FALSE}
+library(SNPRelate)
+
+vcf.flt.fn <- "/Users/neasci/Documents/clim_morph_HETH/HETH.4assign.flt.vcf.gz"
+snpgdsVCF2GDS(vcf.flt.fn, "heth.flt.gds", method="biallelic.only")
+
+genofile.flt <- snpgdsOpen("heth.flt.gds")
+
+# LD
+set.seed(1000)
+snpset.flt <- snpgdsLDpruning(genofile.flt, ld.threshold=0.2, verbose=F)
+
+# Get all selected snp id
+snpset.id.flt <- unlist(unname(snpset.flt))
+
+# Get sample id
+sample.id.flt <- read.gdsn(index.gdsn(genofile.flt, "sample.id"))
+
+# PCA
+pca.flt <- snpgdsPCA(genofile.flt, autosome.only = FALSE, snp.id=snpset.id.flt, num.thread=2)
+
+#calculate the percent of variation is accounted for by the top principal components
+pc.percent.flt <- pca.flt$varprop*100
+#head(round(pc.percent.flt, 2))
+
+# make a data.frame
+tab.flt <- data.frame(sample.id = pca.flt$sample.id,
+    EV1 = pca.flt$eigenvect[,1],    # the first eigenvector
+    EV2 = pca.flt$eigenvect[,2],    # the second eigenvector
+    stringsAsFactors = FALSE)
+#head(tab.flt)
+
+plot(tab.flt$EV2, tab.flt$EV1, xlab="eigenvector 2", ylab="eigenvector 1")
+
+showfile.gds(closeall=TRUE)  ## TO CLOSE GDS!!!
+```
+
+&nbsp;
+
+# Combine this study and Teresa's vcf with RADseq vcf
+(~/scripts/mergeVcfs.sbatch)
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=mergeVcfs
+#SBATCH --output=mergeVcfs.%j.out
+#SBATCH --error=mergeVcfs.%j.err
+#SBATCH -t 12:00:00
+#SBATCH -p RM-shared
+##SBATCH -N 1
+##SBATCH --ntasks-per-node 24
+##SBATCH --mem=128G
+#SBATCH -A 
+#SBATCH --mail-type=END
+#SBATCH  --mail-user=
+
+set -x
+
+
+#cd /ocean/projects/deb200006p/adamsne2/HETH/vcfs/
+
+module load bcftools/1.10.2
+module load vcftools/
+
+REFERENCE="/ocean/projects/deb200006p/adamsne2/HETH/reference/HETH.rmcont.assembly.fasta"
+REFDIR="/ocean/projects/deb200006p/adamsne2/HETH/reference"
+
+# merge VCFs
+#bcftools merge "$REFDIR"/HETH.all.clean.hethv0.rm_hets.rmrel.rmcont.vcf.gz HETH.4assign.flt.vcf.gz -O z -o  HETHyRAD.vcf.gz
+
+# merge VCFs
+SITESDIR="/ocean/projects/deb200006p/adamsne2/HETH/vcfs"
+bcftools merge "$REFDIR"/HETH.all.clean.hethv0.rm_hets.rmrel.rmcont_rmscaf.srt.vcf.gz HETH.4assign.flt.srt.vcf.gz -R "$SITESDIR"/vcfIntersec/0002.vcf -O z -o HETHyRAD.vcf.gz
+```
+
+&nbsp;
+
+## Combine metadata for this study + Teresa's HETH + RAD samples
+```{r, warning=FALSE, message=FALSE}
+#rad.samp <- as.data.frame(sample.id.merg[1:178])
+#colnames(rad.samp) <- "Sample"
+#rad.samp$Population <- "rad"
+
+rad.meta <- read_excel("~/Documents/clim_morph_HETH/Allisons_HETH_master.xlsx", sheet = "Library_master")
+rad.meta$Population <- rad.meta$State
+rad.meta$Sample <- paste(rad.meta$Field_Number, rad.meta$Field_Number, sep = "_")
+rad.samp <- read.csv("~/Documents/clim_morph_HETH/RADseqSamples.csv", header = FALSE)
+rad.meta <- rad.meta %>% filter(Sample %in% as.character(rad.samp[,1]))
+
+heth.rad <- full_join(heth.all.rm %>% select(-Month), rad.meta %>% select(-Month)) 
+
+# add Genoscape breeding pop assignments for RADseq samples
+breed <- read.delim("~/Documents/clim_morph_HETH/HETH.breeding.meta.rad_fluidigm.final_fixed2.txt")
+
+```
+
+&nbsp;
+
+## PCA using SNPRelate on this study and Teresa's and RADseq merged SNPs
+N=449, SNPs=29506
+```{r, warning=FALSE, message=FALSE}
+library(SNPRelate)
+library(SeqArray)
+library(RColorBrewer)
+
+vcf.merg.fn <- "/Users/neasci/Documents/clim_morph_HETH/HETHyRAD.vcf.gz"
+snpgdsVCF2GDS(vcf.merg.fn, "heth.merg.gds", method="biallelic.only")
+
+genofile.merg <- snpgdsOpen("heth.merg.gds") #N=449
+
+
+# Get sample id
+sample.id.merg <- read.gdsn(index.gdsn(genofile.merg, "sample.id"))
+
+# PCA
+pca.merg <- snpgdsPCA(genofile.merg, autosome.only = FALSE, num.thread=2) #snp.id=snpset.id.merg
+
+# calculate the percent of variation is accounted for by the top principal components
+pc.percent.merg <- pca.merg$varprop*100
+head(round(pc.percent.merg, 2))
+
+# make a data.frame
+tab.merge <- data.frame(sample.id = pca.merg$sample.id,
+    EV1 = pca.merg$eigenvect[,1],    # the first eigenvector
+    EV2 = pca.merg$eigenvect[,2],    # the second eigenvector
+    stringsAsFactors = FALSE)
+#head(tab.merge)
+
+# Get population information
+# the order of sample IDs as the same as population codes
+heth.rad <- heth.rad %>% arrange(Sample)
+
+#head(cbind(sample.id.merg, heth.rad$Population))
+
+tab.merge2 <- data.frame(sample.id = pca.merg$sample.id,
+    Population = factor(heth.rad$Population)[match(pca.merg$sample.id, sample.id.merg)],
+    EV1 = pca.merg$eigenvect[,1],    # the first eigenvector
+    EV2 = pca.merg$eigenvect[,2],    # the second eigenvector
+    stringsAsFactors = FALSE)
+#head(tab.merge2)
+
+
+tab.merge2$Source <- ifelse(tab.merge2$Population == "IL", "this study", "foo") #UCD
+tab.merge2$Source <- ifelse(tab.merge2$Population == "AB"| tab.merge2$Population == "CN" | tab.merge2$Population == "MB", "set 2", tab.merge2$Source) #teresa
+tab.merge2$Source <- ifelse(tab.merge2$Population == "AK"| tab.merge2$Population == "AZ" | tab.merge2$Population == "BC" |tab.merge2$Population == "CA"| tab.merge2$Population == "ME" | tab.merge2$Population == "NM"|tab.merge2$Population == "PA"| tab.merge2$Population == "UT", "set 1", tab.merge2$Source) #rad
+
+#tab.merge2$Population <- factor(tab.merge2$Population, levels = c("AK", "BC", "AB", "MB", "CN", "IL", "PA", "ME", "CA", "UT", "AZ", "NM"))
+
+lbls <- paste("PC", 1:4, " (", format(pc.percent.merg[1:4], digits=2), "%)", sep="")
+#pairs(pca.merg$eigenvect[,1:4], col=tab.merge2$Population, labels=lbls)
+
+# remove bad samples - Z438055
+tab.merge2 <- tab.merge2 %>% filter(!sample.id == "Z438055")
+
+hybs <- c("2311-00944", "2311-01919", "2341-14499", "2341-14902", "2341-15638", "2591-00133")
+tab.merge3a <- tab.merge2 %>% mutate(Sample=sample.id) %>% separate(Sample, into = c("Sample", "nada"), sep = "_") %>% dplyr::select(-nada)
+tab.merge3 <- left_join(tab.merge3a, breed)
+tab.merge3$Genetic.Cluster <- ifelse(grepl("^AB", tab.merge3$Sample), "EasternTaiga", tab.merge3$Genetic.Cluster)
+tab.merge3$Genetic.Cluster <- ifelse(grepl("^MB", tab.merge3$Sample), "EasternTaiga", tab.merge3$Genetic.Cluster)
+tab.merge3$Genetic.Cluster <- ifelse(grepl("^MN", tab.merge3$Sample), "EasternTaiga", tab.merge3$Genetic.Cluster)
+tab.merge3$Genetic.Cluster <- ifelse(grepl("^UP", tab.merge3$Sample), "EasternTaiga", tab.merge3$Genetic.Cluster)
+tab.merge3$Genetic.Cluster <- ifelse(grepl("^C7", tab.merge3$Sample), "EasternTaiga", tab.merge3$Genetic.Cluster)
+tab.merge3$Genetic.Cluster <- ifelse(tab.merge3$Sample == "2341-13975", "EasternTaiga", tab.merge3$Genetic.Cluster)
+tab.merge3$Genetic.Cluster <- ifelse(tab.merge3$Sample == "2551-80770", "PacificSouth", tab.merge3$Genetic.Cluster)
+tab.merge3$Genetic.Cluster <- ifelse(tab.merge3$Sample == "2551-80774", "PacificSouth", tab.merge3$Genetic.Cluster)
+tab.merge3$Genetic.Cluster <- ifelse(tab.merge3$Sample == "2551-80771", "PacificSouth", tab.merge3$Genetic.Cluster)
+tab.merge3$Genetic.Cluster <- ifelse(tab.merge3$Sample %in% hybs, "PacificSouth_hyb", tab.merge3$Genetic.Cluster)
+tab.merge3$Genetic.Cluster <- ifelse(tab.merge3$Source == "this study", "Unknown", tab.merge3$Genetic.Cluster)
+tab.merge3$Genetic.Cluster <- ifelse(tab.merge3$Sample %in% c("Z332011", "Z332018"), "Unknown", tab.merge3$Genetic.Cluster)
+tab.merge3$Population <- ifelse(tab.merge3$Sample %in% c("Z332011", "Z332018"), "IL", tab.merge3$Population)
+tab.merge3$Source <- ifelse(tab.merge3$Sample %in% c("Z332011", "Z332018"), "this study", tab.merge3$Source)
+
+tab.merge3$Source <- factor(tab.merge3$Source, levels = c("this study", "set 1", "set 2"))
+
+
+cluster_cols4pca <-  gscols <- c(EasternTaiga = "steelblue2", InteriorWest = "palevioletred3", PacificCentral = "gold", PacificNorth = "seagreen", PacificSouth = "darkorange3", PacificSouth_hyb = "orange", Unknown = "gray80")
+
+
+cluster.pca <- ggplot(tab.merge3, aes(x=EV1, y=EV2, fill=Genetic.Cluster, shape=Source)) +
+  geom_point(size=4, alpha=0.90, color="gray32") +
+  #geom_text(label=tab.merge2$sample.id) + # to ID sample in the middle
+  xlab(lbls[1]) + ylab(lbls[2]) +
+  scale_fill_manual(values = cluster_cols4pca) +
+  scale_shape_manual(values=c(24, 21, 22)) +
+  guides(fill = guide_legend(override.aes = list(shape = c(21)), title = "Breeding cluster")) +
+  theme_minimal()
+
+cluster.noChi <- ggplot(tab.merge3 %>% filter(!Source == "this study"), aes(x=EV1, y=EV2, fill=Genetic.Cluster, shape=Source)) +
+  geom_point(size=4, alpha=0.75, color="gray32") +
+  #geom_text(label=tab.merge2$sample.id) + # to ID sample in the middle
+  xlab(lbls[1]) + ylab(lbls[2]) +
+  scale_fill_manual(values = cluster_cols4pca) +
+  scale_shape_manual(values=c(21, 22)) +
+  guides(fill = guide_legend(override.aes = list(shape = c(21)), title = "Breeding cluster")) +
+  theme_minimal()
+
+
+ggpubr::ggarrange(cluster.pca, cluster.noChi)
+
+
+```
+
+&nbsp;
+&nbsp;
+
+# Use assignPop to identify breeding population this study's samples come from
+## Set up files - known breeding population samples - Teresa's and RADseq samples
+```{r, warning=FALSE, message=FALSE}
+library(readxl)
+library(vcfR)
+library(adegenet)
+library(hierfstat)
+
+
+# baseline data collected from source population (RADseq breeding pop assigned to clusters, and Teresa's)
+hethyrad.vcf <- read.vcfR("/Users/neasci/Documents/clim_morph_HETH/HETHyRAD.vcf.gz")
+hethyrad.genind <- vcfR2genind(hethyrad.vcf) ## Create genind object
+
+# get pop names
+hethyrad.pops <- hethyrad.genind@tab[,1] %>%
+  names() %>%
+  as_tibble %>%
+  separate(value, into = c("Sample", "stuff"), sep = "_") %>% dplyr::select(-stuff)
+
+# define studies and subset to just RADseq and Teresa's samples
+hethyrad.pops$Pop <- ifelse(grepl("^Z", hethyrad.pops$Sample), "thisStudy", "RADseq")
+hethyrad.pops$Pop <- ifelse(grepl("^AB", hethyrad.pops$Sample), "AB", hethyrad.pops$Pop)
+hethyrad.pops$Pop <- ifelse(grepl("^MB", hethyrad.pops$Sample), "MB", hethyrad.pops$Pop)
+hethyrad.pops$Pop <- ifelse(grepl("^MN", hethyrad.pops$Sample), "CN", hethyrad.pops$Pop)
+hethyrad.pops$Pop <- ifelse(grepl("^UP", hethyrad.pops$Sample), "CN", hethyrad.pops$Pop)
+hethyrad.pops <- hethyrad.pops %>% mutate(Pop = as.factor(Pop))
+
+hethyrad.genind@pop <- hethyrad.pops$Pop
+
+rad.genind <- poppr::popsub(hethyrad.genind, exclude=c("thisStudy")) # 214 individuals; 29,506 loci
+
+# define genetic clusters - using breed from CH and assigning all of Teresa's to EasternTaiga
+rad.popsA <- rad.genind@tab[,1] %>%
+  names() %>%
+  as_tibble %>%
+  separate(value, into = c("Sample", "stuff"), sep = "_") %>% dplyr::select(-stuff)
+
+rad.pops <- full_join(rad.popsA, breed)
+rad.pops$Genetic.Cluster <- ifelse(grepl("^AB", rad.pops$Sample), "EasternTaiga", rad.pops$Genetic.Cluster)
+rad.pops$Genetic.Cluster <- ifelse(grepl("^MB", rad.pops$Sample), "EasternTaiga", rad.pops$Genetic.Cluster)
+rad.pops$Genetic.Cluster <- ifelse(grepl("^MN", rad.pops$Sample), "EasternTaiga", rad.pops$Genetic.Cluster)
+rad.pops$Genetic.Cluster <- ifelse(grepl("^UP", rad.pops$Sample), "EasternTaiga", rad.pops$Genetic.Cluster)
+rad.pops$Genetic.Cluster <- ifelse(grepl("^C7", rad.pops$Sample), "EasternTaiga", rad.pops$Genetic.Cluster)
+
+# find samples still missing genetic cluster info, and add based on lat/long and genoscape
+missSamps1 <- rad.pops %>% filter(is.na(Genetic.Cluster))
+# add allisons meta data
+meta.a <- read_xlsx("~/Documents/clim_morph_HETH/Allisons_HETH_master.xlsx", sheet = "Library_master")
+meta.a$Sample <- meta.a$Field_Number 
+missSamps1.a <- meta.a %>% filter(Sample %in% missSamps1$Sample)
+rad.pops$Genetic.Cluster <- ifelse(rad.pops$Sample == "2341-13975", "EasternTaiga", rad.pops$Genetic.Cluster)
+rad.pops$Genetic.Cluster <- ifelse(rad.pops$Sample == "2551-80770", "PacificSouth", rad.pops$Genetic.Cluster)
+rad.pops$Genetic.Cluster <- ifelse(rad.pops$Sample == "2551-80774", "PacificSouth", rad.pops$Genetic.Cluster)
+rad.pops$Genetic.Cluster <- ifelse(rad.pops$Sample == "2551-80771", "PacificSouth", rad.pops$Genetic.Cluster)
+
+# remove samples that were in CH breed data but not in the rad genetic data, and remove any duplicates
+missSamps2 <- setdiff(rad.pops$Sample, rad.popsA$Sample) 
+rad.pops <- rad.pops %>% filter(!Sample %in% missSamps2) #N=215
+rad.pops <- rad.pops[!duplicated(rad.pops$Sample), ] #N=214
+
+# assign genid pops as genetic clusters
+rad.pops <- rad.pops %>% mutate(Genetic.Cluster = as.factor(Genetic.Cluster))
+rad.genind@pop <- rad.pops$Genetic.Cluster
+strata(rad.genind) <- as.data.frame(rad.pops$Genetic.Cluster)
+
+
+# save genind obj to convert to genepop format for assignPop - using writeGenPop.R from https://github.com/romunov/zvau/blob/master/R/writeGenPop.R
+
+source("~/Documents/clim_morph_HETH/popAssignment/writeGenPop.R")
+
+#writeGenPop(rad.genind, "~/Documents/clim_morph_HETH/popAssignment/rad.genepop.txt", comment = "Allison's RAD and Teresa's data") 
+
+```
+
+&nbsp;
+
+## Set up files - UNknown samples - this study
+```{r, warning=FALSE, message=FALSE}
+#### get just my samples VCF to run the unknowns - make genepop
+bay.genind <- poppr::popsub(hethyrad.genind, exclude=c("AB", "CN", "MB", "RADseq")) # 235 individuals; 29,506 loci
+#save(bay.genind, file="~/Documents/clim_morph_HETH/popAssignment/bay.genind.RData")
+
+source("~/Documents/clim_morph_HETH/popAssignment/writeGenPop.R")
+
+#writeGenPop(bay.genind, "~/Documents/clim_morph_HETH/popAssignment/bay.genepop.txt", comment = "Bay's HETH data to assign") 
+
+```
+
+&nbsp;
+
+## Run assignPOP
+```{r, eval=FALSE, warning=FALSE, message=FALSE}
+library(assignPOP)
+library(klaR)
+
+# Read in known data (Teresa's and RADseq)
+rad.gpopy <- read.Genepop("~/Documents/clim_morph_HETH/popAssignment/rad.genepop.txt", haploid=FALSE, pop.names = c("EasternTaiga", "InteriorWest", "PacificCentral", "PacificNorth", "PacificSouth", "PacificSouth_hyb")) 
+
+# Read in unknown data (this study)
+bay.gpop <- read.Genepop("~/Documents/clim_morph_HETH/popAssignment/bay.genepop.txt", haploid = FALSE, pop.names=c("thisStudy"))
+
+
+# perform assignment test with 3 different models
+assign.X(rad.gpop, bay.gpop, model="randomForest", dir = "~/Documents/NicoleAdams/assignPop3_assign_RF/")
+assign.X(rad.gpop, bay.gpop, model="naiveBayes", dir = "~/Documents/NicoleAdams/assignPop3_assign_Bayes/")
+assign.X(rad.gpop, bay.gpop, model="svm", dir = "~/Documents/NicoleAdams/assignPop3_assign_svm/")
+
+```
+
+&nbsp;
+
+### Plot assignPop results
+```{r, warning=FALSE, message=FALSE}
+# Read in assignPop results and make plot
+rf <- read.table("~/Documents/clim_morph_HETH/popAssignment/assignPop3_assign_RF/AssignmentResult_RF.txt", header = T)
+
+# melt
+ndf <- melt(rf, id.vars=c("Ind.ID","pred.pop"))
+
+# match colors to genoscape map
+gscols <- c("steelblue2", "palevioletred3", "gold", "seagreen", "darkorange3", "orange")
+#scales::show_col(gscols)
+popCols <- c("EasternTaiga" = gscols[1], "InteriorWest" = gscols[2], "PacificCentral" = gscols[3], "PacificNorth" = gscols[4], "PacificSouth" = gscols[5], "PacificSouth_hyb" = gscols[6])
+
+
+stackplot <- ggplot(ndf, aes(x=Ind.ID, y=value, fill=variable))+
+        geom_bar(stat="identity", width=1, alpha=0.7)+ # width=1 allows no space between bars
+        scale_fill_manual(values = popCols)+ # Make the bar color in grey scale
+        ylab("Assignment probability")+
+        xlab("Individuals")+
+        guides(fill=guide_legend(title=NULL, position = "bottom"))+ #Hiding title of legend
+        theme_bw()+
+        theme(panel.grid.major = element_blank(), panel.grid.minor=element_blank(),#hiding grid of the panel
+              strip.background = element_rect(colour="black", fill="white", linetype="solid"),#change facet title background color
+              plot.title = element_text(size=16, vjust=0.8),
+              legend.text = element_text(size=14),
+              strip.text.x = element_text(size=16),
+              axis.title.y = element_text(size=16), axis.text.y = element_text(size=14, colour="black"),
+              axis.title.x = element_text(size=16), axis.text.x = element_blank(),
+              axis.ticks.x=element_blank())
+
+stackplot
+```
+
+&nbsp;
+
+Map of our samples + teresas + radSeq WITH SHAPEFILE of GENOSCAPE groups
+Following https://github.com/cbossu/BGP_GenomicsPipeline/blob/main/7.Make-a-BGP-map-COYE.wWint.Rmd
+```{r}
+# install packages
+#remotes::install_github("eriqande/TESS3_encho_sen")  # for special version of tess3r
+#remotes::install_github("eriqande/genoscapeRtools")  # for Eric's genoscapeRtools 
+
+library(raster)  # important to load before tidyverse, otherwise it masks select()
+library(tidyverse)
+library(downloader) # to DL natural earth data
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(terra)
+library(tidyterra)
+library(ggplot2)
+library(sf)
+
+cluster_colors <-  gscols <- c(EasternTaiga = "steelblue2", InteriorWest = "palevioletred3", PacificCentral = "gold", PacificNorth = "seagreen", PacificSouth = "darkorange3", PacificSouthHyb = "orange")
+
+#scales::show_col(cluster_colors)  
+
+heth_sh1 <- st_read("~/Documents/clim_morph_HETH/HETH_shapefiles/HETH.genoscape_brick.WGS84_1.5no_ovlp2.shp") # Interior West
+heth_sh2 <- st_read("~/Documents/clim_morph_HETH/HETH_shapefiles/HETH.genoscape_brick.WGS84_2.5no_ovlp2.shp") # Pacific North
+heth_sh3 <- st_read("~/Documents/clim_morph_HETH/HETH_shapefiles/HETH.genoscape_brick.WGS84_3.5no_ovlp2.shp") # Eastern Taiga
+heth_sh4 <- st_read("~/Documents/clim_morph_HETH/HETH_shapefiles/HETH.genoscape_brick.WGS84_4.5no_ovlp2.shp") # Pacific South
+heth_sh5 <- st_read("~/Documents/clim_morph_HETH/HETH_shapefiles/HETH.genoscape_brick.WGS84_5.5no_ovlp2.shp") # Pacific Central
+
+# convert sf objs to spatVectors for terra 
+heth_sh1_vect <- vect(heth_sh1)
+heth_sh2_vect <- vect(heth_sh2)
+heth_sh3_vect <- vect(heth_sh3)
+heth_sh4_vect <- vect(heth_sh4)
+heth_sh5_vect <- vect(heth_sh5)
+
+# Define the domain for cropping
+xmin <- -170
+xmax <- -45
+ymin <- 25
+ymax <- 71
+
+# Get coastline and crop
+coast <- ne_coastline(returnclass = "sf")
+coast <- vect(coast)  # Convert to terra's SpatVector
+coast_cropped <- crop(coast, ext(xmin, xmax, ymin, ymax))
+
+# Get countries and crop
+country <- ne_countries(country = c("United States of America", "Mexico", "Canada"), returnclass = "sf")
+country <- vect(country)  # Convert to terra's SpatVector
+country_cropped <- crop(country, ext(xmin, xmax, ymin, ymax))
+
+# Get states and crop
+states <- ne_states(country = c("United States of America", "Mexico", "Canada"), returnclass = "sf")
+states <- vect(states)  # Convert to terra's SpatVector
+states_cropped <- crop(states, ext(xmin, xmax, ymin, ymax))
+
+heth.rad$Source <- ifelse(heth.rad$Population == "IL", "this study", "foo") #UCD
+heth.rad$Source <- ifelse(heth.rad$Population == "AB"| heth.rad$Population == "CN" | heth.rad$Population == "MB", "set 2", heth.rad$Source) #teresa
+heth.rad$Source <- ifelse(heth.rad$Population == "AK"| heth.rad$Population == "AZ" | heth.rad$Population == "BC" |heth.rad$Population == "CA"| heth.rad$Population == "ME" | heth.rad$Population == "NM"|heth.rad$Population == "PA"| heth.rad$Population == "UT", "set 1", heth.rad$Source) #rad
+heth.rad$Source <- factor(heth.rad$Source, levels = c("this study", "set 1", "set 2"))
+
+heth.gsp3 <- ggplot() + 
+  #geom_spatvector(data = coast_cropped) +
+  geom_spatvector(data = country_cropped, color = "gray25", fill = NA) +
+  geom_spatvector(data = states_cropped, color = "gray25", fill = NA) +
+  # Assume heth_sh* are SpatVector objects
+  geom_spatvector(data = heth_sh1_vect, aes(fill = "InteriorWest"), alpha = 0.5) + 
+  geom_spatvector(data = heth_sh2_vect, aes(fill = "PacificNorth"), alpha = 0.5) + 
+  geom_spatvector(data = heth_sh3_vect, aes(fill = "EasternTaiga"), alpha = 0.5) +
+  geom_spatvector(data = heth_sh4_vect, aes(fill = "PacificSouth"), alpha = 0.5) +
+  geom_spatvector(data = heth_sh5_vect, aes(fill = "PacificCentral"), alpha = 0.5) +
+  geom_point(data = heth.rad, mapping = aes(x = Long, y = Lat, shape = Source), size = 6, stroke=1.2, alpha = 0.88, inherit.aes = FALSE, show.legend = FALSE) +
+  scale_fill_manual(values = cluster_colors) +
+  scale_shape_manual(values = c(24, 21, 22)) +
+  xlab("Longitude") + ylab("Latitude") +
+  guides(fill = guide_legend(override.aes = list(shape = c(21)), title = "Breeding cluster")) +
+  theme_bw() +
+  theme(legend.position = c(0.19, 0.29), plot.margin = unit(c(0, 0, 0, 0), "inches")) +
+  coord_sf()
+
+#ggsave2(plot = heth.gsp3, filename = "~/Documents/clim_morph_HETH/HETH-teresa-rad_mapwclusters_7-28-24.png", width = 12, height = 8)
+
+heth.gsp3
+```
+
+&nbsp;
+
+# Figure S2 - map, PCAs, assignPop results
+```{r, warning=FALSE, message=FALSE}
+row1 <- ggarrange(heth.gsp3, stackplot + theme(legend.position = "none"), labels = c("A", "B"), nrow=1)
+
+row2 <- ggarrange(cluster.pca, cluster.noChi + theme(legend.position = "none"),  labels = c("C", "D") )
+
+map_pcas_assign <-  ggarrange(row1, row2, ncol = 1 )
+
+#ggsave(plot = map_pcas_assign, filename = "~/Documents/clim_morph_HETH/HETH-teresa-rad_mapYpcasYassign_7-31-24.png", width = 13, height = 10)
+
+map_pcas_assign
+```
+
